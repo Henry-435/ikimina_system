@@ -1,6 +1,6 @@
 <?php
 // ======================================================================
-// Loans Management
+// Loans Management - Recording Ledger with Mistake Correction & Filters
 // ======================================================================
 
 $pageTitle = 'Loans Management - Ikimina';
@@ -11,6 +11,7 @@ require_once __DIR__ . '/includes/auth.php';
 
 require_login();
 
+$currentUser = current_user();
 $message = '';
 $messageType = '';
 
@@ -48,32 +49,48 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_loan'])) {
             $messageType = "error";
         } else {
             // Verify member exists
-            $checkMember = $conn->prepare("SELECT id FROM members WHERE id = ?");
+            $checkMember = $conn->prepare("SELECT id, full_name FROM members WHERE id = ?");
             $checkMember->bind_param("i", $member_id);
             $checkMember->execute();
+            $mRes = $checkMember->get_result();
+            $memberData = $mRes->fetch_assoc();
 
             // Verify account exists
-            $checkAccount = $conn->prepare("SELECT id FROM financial_accounts WHERE id = ?");
+            $checkAccount = $conn->prepare("SELECT id, account_name FROM financial_accounts WHERE id = ?");
             $checkAccount->bind_param("i", $account_id);
             $checkAccount->execute();
+            $accRes = $checkAccount->get_result();
+            $accountData = $accRes->fetch_assoc();
 
-            if ($checkMember->get_result()->num_rows === 0 || $checkAccount->get_result()->num_rows === 0) {
+            if (!$memberData || !$accountData) {
                 $message = "Invalid member or disbursement account selected.";
                 $messageType = "error";
             } else {
                 $total_due = round($principal + $interest, 2);
                 $status = 'ACTIVE';
+                $createdBy = $currentUser['id'];
+
+                // Balance check for soft warning
+                $currentBal = get_account_balance($conn, $account_id);
+                $projectedBal = $currentBal - $principal;
 
                 $stmt = $conn->prepare("
                     INSERT INTO loans
-                    (member_id, principal, interest_amount, total_due, loan_date, due_date, status, disbursement_account_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (member_id, principal, interest_amount, total_due, loan_date, due_date, status, disbursement_account_id, created_by)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ");
-                $stmt->bind_param("idddsssi", $member_id, $principal, $interest, $total_due, $loan_date, $due_date, $status, $account_id);
+                $stmt->bind_param("idddsssii", $member_id, $principal, $interest, $total_due, $loan_date, $due_date, $status, $account_id, $createdBy);
 
                 if ($stmt->execute()) {
+                    $newId = $stmt->insert_id;
                     $stmt->close();
-                    header("Location: loans.php?saved=1");
+                    log_activity($conn, 'CREATE', 'loan', $newId, "Issued loan: {$principal} RWF to {$memberData['full_name']}");
+
+                    if ($projectedBal < 0) {
+                        header("Location: loans.php?saved=1&low_bal=1&acc=" . urlencode($accountData['account_name']) . "&bal=" . urlencode((string)$projectedBal));
+                    } else {
+                        header("Location: loans.php?saved=1");
+                    }
                     exit;
                 } else {
                     $message = "Unable to record the loan.";
@@ -89,17 +106,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_loan'])) {
 
 // Notifications
 if (isset($_GET['saved'])) {
-    $message = "Loan registered successfully!";
+    if (isset($_GET['low_bal'])) {
+        $accName = htmlspecialchars($_GET['acc'] ?? 'Account');
+        $bal = number_format((float)($_GET['bal'] ?? 0));
+        $message = "Loan registered! ⚠️ Notice: {$accName} balance is currently negative ({$bal} RWF). Please verify pending cash collections.";
+        $messageType = "warning";
+    } else {
+        $message = "Loan registered successfully!";
+        $messageType = "success";
+    }
+} elseif (isset($_GET['updated'])) {
+    $message = "Loan details updated successfully!";
     $messageType = "success";
+} elseif (isset($_GET['voided'])) {
+    $message = "Loan voided successfully and removed from active totals.";
+    $messageType = "warning";
 }
 
-// Members list
+// Members & Accounts
 $members = $conn->query("SELECT id, full_name FROM members ORDER BY full_name ASC");
-
-// Financial accounts
 $accounts = $conn->query("SELECT id, account_name FROM financial_accounts ORDER BY account_name ASC");
 
-// Loan summary stats
+// Loan summary stats (active only)
 $summary = $conn->query("
     SELECT
         COUNT(*) AS total_loans,
@@ -113,26 +141,61 @@ $summary = $conn->query("
      LEFT JOIN (
         SELECT loan_id, SUM(amount) AS paid
         FROM repayments
+        WHERE is_void = 0
         GROUP BY loan_id
      ) r ON l.id = r.loan_id
+     WHERE l.is_void = 0
 ");
 $loanSummary = $summary ? $summary->fetch_assoc() : ['total_loans' => 0, 'total_due' => 0, 'outstanding' => 0];
 
-// Loan history list
-$loanHistory = $conn->query("
+// Filters for Loan Records
+$filterFrom = trim($_GET['from_date'] ?? '');
+$filterTo = trim($_GET['to_date'] ?? '');
+$filterMember = filter_input(INPUT_GET, 'member_id', FILTER_VALIDATE_INT);
+$showVoid = (isset($_GET['show_void']) && (int)$_GET['show_void'] === 1) ? 1 : 0;
+
+$whereClause = "WHERE 1=1";
+$params = [];
+$types = "";
+
+if ($showVoid === 0) {
+    $whereClause .= " AND l.is_void = 0";
+}
+
+if ($filterFrom !== '') {
+    $whereClause .= " AND l.loan_date >= ?";
+    $params[] = $filterFrom;
+    $types .= "s";
+}
+
+if ($filterTo !== '') {
+    $whereClause .= " AND l.loan_date <= ?";
+    $params[] = $filterTo;
+    $types .= "s";
+}
+
+if ($filterMember) {
+    $whereClause .= " AND l.member_id = ?";
+    $params[] = $filterMember;
+    $types .= "i";
+}
+
+$loanHistorySql = "
     SELECT
-        l.id,
+        l.id, l.member_id,
         m.full_name,
         l.principal,
         l.interest_amount,
         l.total_due,
         l.loan_date,
         l.due_date,
-        l.status,
+        l.is_void,
+        l.void_reason,
         a.account_name,
         COALESCE(r.paid, 0) AS amount_paid,
         GREATEST(l.total_due - COALESCE(r.paid, 0), 0) AS remaining_balance,
         CASE
+            WHEN l.is_void = 1 THEN 'VOIDED'
             WHEN l.total_due <= COALESCE(r.paid, 0) THEN 'COMPLETED'
             WHEN l.due_date < CURDATE() THEN 'OVERDUE'
             ELSE 'ACTIVE'
@@ -143,10 +206,21 @@ $loanHistory = $conn->query("
      LEFT JOIN (
         SELECT loan_id, SUM(amount) AS paid
         FROM repayments
+        WHERE is_void = 0
         GROUP BY loan_id
      ) r ON l.id = r.loan_id
+     {$whereClause}
      ORDER BY l.id DESC
-");
+     LIMIT 200
+";
+
+$lhStmt = $conn->prepare($loanHistorySql);
+if (!empty($params)) {
+    $lhStmt->bind_param($types, ...$params);
+}
+$lhStmt->execute();
+$loanHistory = $lhStmt->get_result();
+$lhStmt->close();
 
 require_once __DIR__ . '/includes/header.php';
 ?>
@@ -154,7 +228,7 @@ require_once __DIR__ . '/includes/header.php';
 <!-- Loan Statistics Grid -->
 <div class="stat-grid">
     <div class="stat-card">
-        <div class="stat-label">Total Loans Registered</div>
+        <div class="stat-label">Total Loans Issued (Active)</div>
         <div class="stat-value"><?= (int)$loanSummary['total_loans'] ?></div>
     </div>
     <div class="stat-card">
@@ -226,7 +300,6 @@ require_once __DIR__ . '/includes/header.php';
 
         <div class="form-group">
             <label for="due_date">Repayment Due Date <span class="required">*</span></label>
-            <!-- Bug 12 fixed: min=today removed to allow back-dated/historical loans -->
             <input type="date" id="due_date" name="due_date" required>
             <span class="input-hint">Must be on or after loan issue date</span>
         </div>
@@ -239,11 +312,56 @@ require_once __DIR__ . '/includes/header.php';
     </form>
 </div>
 
-<!-- Loan Records Table -->
+<!-- Loan Records Table with Filters -->
 <div class="card">
     <div class="card-title">
         <span>Loan Records Portfolio</span>
     </div>
+
+    <!-- Filter Toolbar -->
+    <form method="GET" action="loans.php" class="filter-card">
+        <div class="filter-grid">
+            <div class="filter-item">
+                <label for="f_from">From Date</label>
+                <input type="date" id="f_from" name="from_date" value="<?= htmlspecialchars($filterFrom) ?>">
+            </div>
+
+            <div class="filter-item">
+                <label for="f_to">To Date</label>
+                <input type="date" id="f_to" name="to_date" value="<?= htmlspecialchars($filterTo) ?>">
+            </div>
+
+            <div class="filter-item">
+                <label for="f_mem">Member</label>
+                <select id="f_mem" name="member_id">
+                    <option value="">All Members</option>
+                    <?php 
+                    $members->data_seek(0);
+                    while ($m = $members->fetch_assoc()): 
+                    ?>
+                        <option value="<?= (int)$m['id'] ?>" <?= $filterMember === (int)$m['id'] ? 'selected' : '' ?>>
+                            <?= htmlspecialchars($m['full_name']) ?>
+                        </option>
+                    <?php endwhile; ?>
+                </select>
+            </div>
+
+            <div class="filter-item" style="min-width: 120px;">
+                <label for="f_void">Status</label>
+                <select id="f_void" name="show_void">
+                    <option value="0" <?= $showVoid === 0 ? 'selected' : '' ?>>Active Only</option>
+                    <option value="1" <?= $showVoid === 1 ? 'selected' : '' ?>>Include Voided</option>
+                </select>
+            </div>
+
+            <div class="filter-actions">
+                <button type="submit" class="btn btn-primary btn-sm">Filter</button>
+                <?php if ($filterFrom !== '' || $filterTo !== '' || $filterMember || $showVoid): ?>
+                    <a href="loans.php" class="btn btn-secondary btn-sm">Reset</a>
+                <?php endif; ?>
+            </div>
+        </div>
+    </form>
 
     <div class="table-wrapper">
         <table class="app-table responsive-table">
@@ -260,19 +378,25 @@ require_once __DIR__ . '/includes/header.php';
                     <th>Due Date</th>
                     <th>Account</th>
                     <th>Status</th>
+                    <th>Actions</th>
                 </tr>
             </thead>
             <tbody>
                 <?php if ($loanHistory && $loanHistory->num_rows > 0): ?>
                     <?php while ($loan = $loanHistory->fetch_assoc()): ?>
-                        <tr>
+                        <?php $isVoided = ((int)$loan['is_void'] === 1); ?>
+                        <tr class="<?= $isVoided ? 'row-voided' : '' ?>">
                             <td data-label="ID">#<?= (int)$loan['id'] ?></td>
-                            <td data-label="Member"><strong><?= htmlspecialchars($loan['full_name']) ?></strong></td>
+                            <td data-label="Member">
+                                <a href="member_statement.php?id=<?= (int)$loan['member_id'] ?>" style="color: var(--primary); font-weight: 600;">
+                                    <?= htmlspecialchars($loan['full_name']) ?>
+                                </a>
+                            </td>
                             <td data-label="Principal"><?= number_format((float)$loan['principal']) ?> RWF</td>
                             <td data-label="Interest"><?= number_format((float)$loan['interest_amount']) ?> RWF</td>
                             <td data-label="Total Due"><strong><?= number_format((float)$loan['total_due']) ?> RWF</strong></td>
                             <td data-label="Paid" class="amount-income"><?= number_format((float)$loan['amount_paid']) ?> RWF</td>
-                            <td data-label="Remaining" class="amount-expense">
+                            <td data-label="Remaining" class="<?= $isVoided ? '' : 'amount-expense' ?>">
                                 <strong><?= number_format((float)$loan['remaining_balance']) ?> RWF</strong>
                             </td>
                             <td data-label="Loan Date"><?= htmlspecialchars($loan['loan_date']) ?></td>
@@ -283,12 +407,28 @@ require_once __DIR__ . '/includes/header.php';
                                     <?= htmlspecialchars($loan['payment_status']) ?>
                                 </span>
                             </td>
+                            <td data-label="Actions">
+                                <?php if (is_admin()): ?>
+                                    <div style="display: flex; gap: 6px; justify-content: flex-end;">
+                                        <?php if (!$isVoided): ?>
+                                            <a href="edit_loan.php?id=<?= (int)$loan['id'] ?>" class="btn btn-secondary btn-sm" title="Edit loan details">
+                                                Edit
+                                            </a>
+                                            <a href="void_record.php?type=loan&id=<?= (int)$loan['id'] ?>" class="btn btn-danger btn-sm" title="Void loan">
+                                                Void
+                                            </a>
+                                        <?php else: ?>
+                                            <small style="color: var(--text-muted); font-size: 11px;">Voided: <?= htmlspecialchars($loan['void_reason'] ?? '') ?></small>
+                                        <?php endif; ?>
+                                    </div>
+                                <?php endif; ?>
+                            </td>
                         </tr>
                     <?php endwhile; ?>
                 <?php else: ?>
                     <tr>
-                        <td colspan="11" class="empty-td" style="text-align: center; padding: 28px; color: var(--text-muted);">
-                            No loans recorded yet.
+                        <td colspan="12" class="empty-td" style="text-align: center; padding: 28px; color: var(--text-muted);">
+                            No loans match your search criteria.
                         </td>
                     </tr>
                 <?php endif; ?>

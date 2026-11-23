@@ -234,7 +234,10 @@ require_once __DIR__ . '/includes/header.php';
                             <td data-label="Address"><?= htmlspecialchars($row['address'] ?? '—') ?></td>
                             <td data-label="Registered On"><?= htmlspecialchars(substr($row['created_at'], 0, 10)) ?></td>
                             <td data-label="Actions">
-                                <div style="display: flex; gap: 8px; justify-content: flex-end;">
+                                <div style="display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap;">
+                                    <a href="member_statement.php?id=<?= (int)$row['id'] ?>" class="btn btn-secondary btn-sm" title="View loans and repayment ledger">
+                                        📜 Ledger
+                                    </a>
                                     <a href="edit_member.php?id=<?= (int)$row['id'] ?>" class="btn btn-secondary btn-sm">
                                         Edit
                                     </a>

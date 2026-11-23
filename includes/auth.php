@@ -214,3 +214,130 @@ function clear_failed_logins(mysqli $conn, string $ip, string $username): void {
         $stmt->close();
     }
 }
+
+/**
+ * Record an action into activity_logs table for audit trail.
+ */
+function log_activity(mysqli $conn, string $action, string $entity_type, int $entity_id, ?string $details = null): void {
+    $userId = $_SESSION['user_id'] ?? null;
+    $stmt = $conn->prepare("
+        INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details)
+        VALUES (?, ?, ?, ?, ?)
+    ");
+    if ($stmt) {
+        $stmt->bind_param("issis", $userId, $action, $entity_type, $entity_id, $details);
+        $stmt->execute();
+        $stmt->close();
+    }
+}
+
+/**
+ * Get current balance for a single account.
+ * Uses an inline query so it works on shared hosts that deny CREATE VIEW.
+ */
+function get_account_balance(mysqli $conn, int $accountId): float {
+    $stmt = $conn->prepare("
+        SELECT
+            a.opening_balance
+            + COALESCE((SELECT SUM(t.amount) FROM transactions t WHERE t.account_id = a.id AND t.transaction_type = 'INCOME'  AND t.is_void = 0), 0)
+            - COALESCE((SELECT SUM(t.amount) FROM transactions t WHERE t.account_id = a.id AND t.transaction_type = 'EXPENSE' AND t.is_void = 0), 0)
+            - COALESCE((SELECT SUM(tr.amount) FROM transfers tr WHERE tr.from_account_id = a.id AND tr.is_void = 0), 0)
+            + COALESCE((SELECT SUM(tr.amount) FROM transfers tr WHERE tr.to_account_id   = a.id AND tr.is_void = 0), 0)
+            - COALESCE((SELECT SUM(l.principal) FROM loans l WHERE l.disbursement_account_id = a.id AND l.is_void = 0), 0)
+            + COALESCE((SELECT SUM(r.amount) FROM repayments r WHERE r.account_id = a.id AND r.is_void = 0), 0)
+            AS current_balance
+        FROM financial_accounts a
+        WHERE a.id = ?
+    ");
+    if ($stmt) {
+        $stmt->bind_param("i", $accountId);
+        $stmt->execute();
+        $res = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return round((float)($res['current_balance'] ?? 0.00), 2);
+    }
+    return 0.00;
+}
+
+/**
+ * Get all account balances as an array keyed by account_id.
+ * Uses inline SQL — works with or without the financial_summary view.
+ */
+function get_all_account_balances(mysqli $conn): array {
+    $result = $conn->query("
+        SELECT
+            a.id AS account_id,
+            a.account_name,
+            a.opening_balance
+            + COALESCE((SELECT SUM(t.amount) FROM transactions t WHERE t.account_id = a.id AND t.transaction_type = 'INCOME'  AND t.is_void = 0), 0)
+            - COALESCE((SELECT SUM(t.amount) FROM transactions t WHERE t.account_id = a.id AND t.transaction_type = 'EXPENSE' AND t.is_void = 0), 0)
+            - COALESCE((SELECT SUM(tr.amount) FROM transfers tr WHERE tr.from_account_id = a.id AND tr.is_void = 0), 0)
+            + COALESCE((SELECT SUM(tr.amount) FROM transfers tr WHERE tr.to_account_id   = a.id AND tr.is_void = 0), 0)
+            - COALESCE((SELECT SUM(l.principal) FROM loans l WHERE l.disbursement_account_id = a.id AND l.is_void = 0), 0)
+            + COALESCE((SELECT SUM(r.amount) FROM repayments r WHERE r.account_id = a.id AND r.is_void = 0), 0)
+            AS current_balance
+        FROM financial_accounts a
+        ORDER BY a.id ASC
+    ");
+    $rows = [];
+    if ($result) {
+        while ($row = $result->fetch_assoc()) {
+            $row['current_balance'] = round((float)$row['current_balance'], 2);
+            $rows[] = $row;
+        }
+    }
+    return $rows;
+}
+
+/**
+ * Get the overall financial summary totals.
+ * Uses inline SQL — works with or without the overall_financial_summary view.
+ */
+function get_overall_summary(mysqli $conn): array {
+    // Total income and expenses from transactions
+    $txResult = $conn->query("
+        SELECT
+            COALESCE(SUM(CASE WHEN transaction_type = 'INCOME'  AND is_void = 0 THEN amount ELSE 0 END), 0) AS total_income,
+            COALESCE(SUM(CASE WHEN transaction_type = 'EXPENSE' AND is_void = 0 THEN amount ELSE 0 END), 0) AS total_expenses
+        FROM transactions
+    ");
+    $tx = $txResult ? $txResult->fetch_assoc() : ['total_income' => 0, 'total_expenses' => 0];
+
+    // Total loans and repayments
+    $loanResult = $conn->query("
+        SELECT
+            COALESCE(SUM(CASE WHEN is_void = 0 THEN total_due ELSE 0 END), 0) AS total_loans
+        FROM loans
+    ");
+    $loans = $loanResult ? $loanResult->fetch_assoc() : ['total_loans' => 0];
+
+    $repResult = $conn->query("
+        SELECT COALESCE(SUM(CASE WHEN is_void = 0 THEN amount ELSE 0 END), 0) AS total_repaid FROM repayments
+    ");
+    $rep = $repResult ? $repResult->fetch_assoc() : ['total_repaid' => 0];
+
+    // Outstanding: active + overdue loans remaining balance
+    $outResult = $conn->query("
+        SELECT COALESCE(SUM(GREATEST(l.total_due - COALESCE(r.paid, 0), 0)), 0) AS outstanding
+        FROM loans l
+        LEFT JOIN (
+            SELECT loan_id, SUM(amount) AS paid FROM repayments WHERE is_void = 0 GROUP BY loan_id
+        ) r ON l.id = r.loan_id
+        WHERE l.is_void = 0 AND l.total_due > COALESCE(r.paid, 0)
+    ");
+    $out = $outResult ? $outResult->fetch_assoc() : ['outstanding' => 0];
+
+    // All balances to sum for total_cash_and_bank
+    $balances = get_all_account_balances($conn);
+    $totalCashBank = array_sum(array_column($balances, 'current_balance'));
+
+    return [
+        'total_cash_and_bank' => round($totalCashBank, 2),
+        'total_income'        => round((float)$tx['total_income'], 2),
+        'total_expenses'      => round((float)$tx['total_expenses'], 2),
+        'total_loans'         => round((float)$loans['total_loans'], 2),
+        'total_repaid'        => round((float)$rep['total_repaid'], 2),
+        'outstanding_loans'   => round((float)$out['outstanding'], 2),
+    ];
+}
+

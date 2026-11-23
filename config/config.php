@@ -3,7 +3,22 @@
 // System Configuration Settings
 // ======================================================================
 
-// Database Credentials
+// -----------------------------------------------------------------------
+// DATABASE CREDENTIALS
+// Update these values when deploying to hosting (InfinityFree, Hostinger, etc.)
+//
+// InfinityFree example:
+//   DB_HOST  => 'sql312.infinityfree.com'   (from your hosting control panel)
+//   DB_USER  => 'if9_12345678'              (your cPanel MySQL username)
+//   DB_PASS  => 'yourpassword'              (the password you set)
+//   DB_NAME  => 'if9_12345678_ikimina_db'   (your full database name)
+//
+// Local XAMPP:
+//   DB_HOST  => 'localhost'
+//   DB_USER  => 'root'
+//   DB_PASS  => ''
+//   DB_NAME  => 'ikimina_db'
+// -----------------------------------------------------------------------
 define('DB_HOST', 'localhost');
 define('DB_USER', 'root');
 define('DB_PASS', '');

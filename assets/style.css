@@ -643,9 +643,97 @@ textarea:focus {
 .badge-ACTIVE { background: var(--info-light); color: var(--info-text); }
 .badge-COMPLETED { background: var(--success-light); color: var(--success-text); }
 .badge-OVERDUE { background: var(--danger-light); color: var(--danger-text); }
+.badge-VOIDED { background: #e2e8f0; color: #475569; text-decoration: line-through; }
 
 .badge-active { background: var(--success-light); color: var(--success-text); }
 .badge-disabled { background: var(--danger-light); color: var(--danger-text); }
+
+.row-voided {
+    opacity: 0.68;
+    background-color: #f8fafc;
+}
+
+.row-voided td {
+    color: #64748b;
+}
+
+/* Filter Toolbar */
+.filter-card {
+    background: #ffffff;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: 16px;
+    margin-bottom: 20px;
+}
+
+.filter-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: flex-end;
+}
+
+.filter-item {
+    display: flex;
+    flex-direction: column;
+    min-width: 140px;
+    flex: 1;
+}
+
+.filter-item label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin-bottom: 5px;
+}
+
+.filter-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+/* Print Styles */
+@media print {
+    .app-sidebar,
+    .app-topbar,
+    .mobile-bottom-nav,
+    .sidebar-backdrop,
+    .quick-actions,
+    .filter-card,
+    .btn,
+    .no-print {
+        display: none !important;
+    }
+
+    body {
+        background: #ffffff !important;
+        color: #000000 !important;
+        padding: 0 !important;
+    }
+
+    .app-main {
+        margin-left: 0 !important;
+        width: 100% !important;
+    }
+
+    .page-body {
+        padding: 0 !important;
+        max-width: 100% !important;
+    }
+
+    .card {
+        box-shadow: none !important;
+        border: 1px solid #ddd !important;
+        page-break-inside: avoid;
+    }
+
+    .app-table th {
+        background: #f1f5f9 !important;
+        color: #000 !important;
+    }
+}
+
 
 /* Bottom Mobile Navigation (< 640px) */
 .mobile-bottom-nav {

@@ -67,6 +67,9 @@ $activePage = $activePage ?? 'dashboard';
             <a href="users.php" class="nav-link <?= $activePage === 'users' ? 'active' : '' ?>">
                 <span>⚙️</span> Users
             </a>
+            <a href="activity_log.php" class="nav-link <?= $activePage === 'activity_log' ? 'active' : '' ?>">
+                <span>📝</span> Activity Log
+            </a>
             <?php endif; ?>
         </nav>
 
